@@ -13,20 +13,61 @@
 #define CEIL(a, b)	(((a) + (b) - 1) / (b))
 #define OFFSET(r,c,nrows,ncols) ((r)*(ncols)+(c))
 
-__global__ void sgemm_v0(float * __restrict__ A,
+template <const int TILE_SIZE>
+__global__ void sgemm_v1(float * __restrict__ A,
                         float * __restrict__ B,
                         float * __restrict__ C,
                         const int M,
                         const int K,
                         const int N) {
-    int a_row = blockIdx.y * blockDim.y + threadIdx.y;
-    int b_col = blockIdx.x * blockDim.x + threadIdx.x;
+    __shared__ float As[TILE_SIZE][TILE_SIZE];
+    __shared__ float Bs[TILE_SIZE][TILE_SIZE];
+
+    int block_row = blockIdx.y * TILE_SIZE;
+    int block_col = blockIdx.x * TILE_SIZE;
+    int thread_row = threadIdx.y;
+    int thread_col = threadIdx.x;
+
+    auto load_as = [&](int ph) {
+        int a_row = block_row + thread_row;
+        int a_col = ph * TILE_SIZE + thread_col;
+        if (a_row < M && a_col < K) {
+            As[thread_row][thread_col] = A[OFFSET(a_row, a_col, M, K)];
+        } else {
+            As[thread_row][thread_col] = 0.0f;
+        }
+    };
+
+    auto load_bs = [&](int ph) {
+        int b_row = ph * TILE_SIZE + thread_row;
+        int b_col = block_col + thread_col;
+        if (b_row < K && b_col < N) {
+            Bs[thread_row][thread_col] = B[OFFSET(b_row, b_col, K, N)];
+        } else {
+            Bs[thread_row][thread_col] = 0.0f;
+        }
+    };
+
+    auto store_c = [&](float sum) {
+        int c_row = block_row + thread_row;
+        int c_col = block_col + thread_col;
+        if (c_row < M && c_col < N) {
+            C[OFFSET(c_row, c_col, M, N)] = sum;
+        }
+    };
 
     float sum = 0.0f;
-    for (int k = 0; k < K; k++) {
-        sum += A[OFFSET(a_row, k, M, K)] * B[OFFSET(k, b_col, K, N)];
+    for (int ph = 0; ph < CEIL(K, TILE_SIZE); ph++) {
+        load_as(ph);
+        load_bs(ph);
+        __syncthreads();
+        for (int k = 0; k < TILE_SIZE; k++) {
+            sum += As[thread_row][k] * Bs[k][thread_col];
+        }
+        __syncthreads();
     }
-    C[OFFSET(a_row, b_col, M, N)] = sum;
+
+    store_c(sum);
 }
 
 static void init_matrix(float *arr, int rows, int cols) {
@@ -37,7 +78,7 @@ static void init_matrix(float *arr, int rows, int cols) {
 
 int main(int argc, char** argv) {
     if (argc != 4) {
-        printf("usage: ./sgemm_v0 [M] [K] [N]\n");
+        printf("usage: ./sgemm_v1 [M] [K] [N]\n");
         exit(0);
     }
     size_t M = atoi(argv[1]);
@@ -77,12 +118,12 @@ int main(int argc, char** argv) {
     CHECK_CUDA(cudaEventCreate(&start));
     CHECK_CUDA(cudaEventCreate(&stop));
 
-	const int BLOCK_SIZE = 32;
+	const int TILE_SIZE = 32;
     CHECK_CUDA(cudaEventRecord(start));
     for (int run = 0 ; run < nIter; run ++ ) {
-        dim3 block_size(BLOCK_SIZE, BLOCK_SIZE);
-        dim3 grid_size(CEIL(N, BLOCK_SIZE), CEIL(M, BLOCK_SIZE));
-        sgemm_v0<<<grid_size, block_size>>>(d_A, d_B, d_C, M, K, N);
+        dim3 block_size(TILE_SIZE, TILE_SIZE);
+        dim3 grid_size(CEIL(N, TILE_SIZE), CEIL(M, TILE_SIZE));
+        sgemm_v1<TILE_SIZE><<<grid_size, block_size>>>(d_A, d_B, d_C, M, K, N);
     }
     CHECK_CUDA(cudaEventRecord(stop));
     CHECK_CUDA(cudaEventSynchronize(stop));

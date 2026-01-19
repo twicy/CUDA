@@ -13,20 +13,102 @@
 #define CEIL(a, b)	(((a) + (b) - 1) / (b))
 #define OFFSET(r,c,nrows,ncols) ((r)*(ncols)+(c))
 
-__global__ void sgemm_v0(float * __restrict__ A,
+template <const int BM, const int BN, const int BK,
+            const int TM, const int TN>
+__global__ void sgemm_v3(float * __restrict__ A,
                         float * __restrict__ B,
                         float * __restrict__ C,
                         const int M,
                         const int K,
                         const int N) {
-    int a_row = blockIdx.y * blockDim.y + threadIdx.y;
-    int b_col = blockIdx.x * blockDim.x + threadIdx.x;
+    __shared__ float AsT[BK][BM];
+    __shared__ float Bs[BK][BN];
 
-    float sum = 0.0f;
-    for (int k = 0; k < K; k++) {
-        sum += A[OFFSET(a_row, k, M, K)] * B[OFFSET(k, b_col, K, N)];
+    float Ar[TM] = {0.0f};
+    float Br[TN] = {0.0f};
+    float acc[TM][TN] = {{0.0f}};
+
+    int block_row = blockIdx.y * BM;
+    int block_col = blockIdx.x * BN;
+    int thread_row = threadIdx.y * TM;
+    int thread_col = threadIdx.x * TN;
+    int nthreads = blockDim.x * blockDim.y;
+    int tid = threadIdx.y * blockDim.x + threadIdx.x;
+
+    auto load_ast = [&](int ph) {
+        int nelements = BM * BK;
+        for (int i = tid; i < nelements; i += nthreads) {
+            int shmem_row = i / BK;
+            int shmem_col = i % BK;
+            int a_row = block_row + shmem_row;
+            int a_col = ph * BK + shmem_col;
+            if (a_row < M && a_col < K) {
+                AsT[shmem_col][shmem_row] = A[OFFSET(a_row, a_col, M, K)];
+            } else {
+                AsT[shmem_col][shmem_row] = 0.0f;
+            }
+        }
+    };
+
+    auto load_bs = [&](int ph) {
+        int nelements = BK * BN;
+        for (int i = tid; i < nelements; i += nthreads) {
+            int shmem_row = i / BN;
+            int shmem_col = i % BN;
+            int b_row = ph * BK + shmem_row;
+            int b_col = block_col + shmem_col;
+            if (b_row < K && b_col < N) {
+                Bs[shmem_row][shmem_col] = B[OFFSET(b_row, b_col, K, N)];
+            } else {
+                Bs[shmem_row][shmem_col] = 0.0f;
+            }
+        }
+    };
+
+    auto load_ar = [&] (int k) {
+        for (int i = 0; i < TM; i++) {
+            Ar[i] = AsT[k][i + thread_row];
+        }
+    };
+    auto load_br = [&] (int k) {
+        for (int i = 0; i < TN; i++) {
+            Br[i] = Bs[k][i + thread_col];
+        }
+    };
+
+    auto mma = [&] () {
+        for (int m = 0; m < TM; m++) {
+            for (int n = 0; n < TN; n++) {
+                acc[m][n] += Ar[m] * Br[n];
+            }
+        }
+    };
+
+    auto store_c = [&]() {
+        for (int m = 0; m < TM; m++) {
+            int c_row = block_row + thread_row + m;
+            if (c_row >= M) break;
+            for (int n = 0; n < TN; n++) {
+                int c_col = block_col + thread_col + n;
+                if (c_col >= N) break;
+                C[OFFSET(c_row, c_col, M, N)] = acc[m][n];
+            }
+        }
+    };
+
+    for (int ph = 0; ph < CEIL(K, BK); ph++) {
+        load_ast(ph);
+        load_bs(ph);
+        __syncthreads();
+        for (int k = 0; k < BK; k++) {
+            load_ar(k);
+            load_br(k);
+            mma();
+        }
+        __syncthreads();
     }
-    C[OFFSET(a_row, b_col, M, N)] = sum;
+
+    store_c();
 }
 
 static void init_matrix(float *arr, int rows, int cols) {
@@ -37,7 +119,7 @@ static void init_matrix(float *arr, int rows, int cols) {
 
 int main(int argc, char** argv) {
     if (argc != 4) {
-        printf("usage: ./sgemm_v0 [M] [K] [N]\n");
+        printf("usage: ./sgemm_v1 [M] [K] [N]\n");
         exit(0);
     }
     size_t M = atoi(argv[1]);
@@ -77,12 +159,13 @@ int main(int argc, char** argv) {
     CHECK_CUDA(cudaEventCreate(&start));
     CHECK_CUDA(cudaEventCreate(&stop));
 
-	const int BLOCK_SIZE = 32;
+	const int BM = 128, BN = 128, BK = 8;
+    const int TM = 8, TN = 8;
     CHECK_CUDA(cudaEventRecord(start));
     for (int run = 0 ; run < nIter; run ++ ) {
-        dim3 block_size(BLOCK_SIZE, BLOCK_SIZE);
-        dim3 grid_size(CEIL(N, BLOCK_SIZE), CEIL(M, BLOCK_SIZE));
-        sgemm_v0<<<grid_size, block_size>>>(d_A, d_B, d_C, M, K, N);
+        dim3 block_size(BN / TN, BM / TM);
+        dim3 grid_size(CEIL(N, BN), CEIL(M, BM));
+        sgemm_v3<BM, BN, BK, TM, TN><<<grid_size, block_size>>>(d_A, d_B, d_C, M, K, N);
     }
     CHECK_CUDA(cudaEventRecord(stop));
     CHECK_CUDA(cudaEventSynchronize(stop));
