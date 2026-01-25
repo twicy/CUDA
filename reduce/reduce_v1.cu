@@ -15,23 +15,49 @@
 
 #define CEIL(a, b) (((a) + (b) - 1) / (b))
 
-__global__ void reduce_v0(float* A, float* B, size_t size) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    float val = 0.0f;
-    if (idx < size) {
-        val = A[idx];
+__device__ float warp_reduce(float &val) {
+    unsigned int mask = 0xffffffff;
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        val += __shfl_down_sync(mask, val, offset);
     }
-    
-    // Using atomicAdd for simplicity in this example
-    // Note: A real optimized kernel would use shared memory/warp shuffles first
-    if (val != 0.0f) {
-        atomicAdd(B, val);
+    return val;
+}
+
+__global__ void reduce_v1(float* A, float* sum, int N) {
+    int a_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    __shared__ float warpSum[32];
+    float thread_sum = (a_idx >= N) ? 0.0f : A[a_idx];
+    thread_sum = warp_reduce(thread_sum);
+
+    int tid = threadIdx.y * blockDim.x + threadIdx.x;
+    int laneId = tid % warpSize;
+    int warpId = tid / warpSize;
+
+    if (laneId == 0) {
+        warpSum[warpId] = thread_sum;
+    }
+
+    __syncthreads();
+
+    if (warpId == 0) {
+        int nwarps = blockDim.x / warpSize;
+        float tmp = (laneId < nwarps) ? warpSum[laneId] : 0.0f;
+        tmp = warp_reduce(tmp);
+        if (laneId == 0) {
+            atomicAdd(sum, tmp);
+        }
+    }
+}
+
+static void init_matrix(float *arr, int rows, int cols) {
+    for (size_t i = 0; i < (size_t)rows * (size_t)cols; i++){
+        arr[i] = rand() / (float)1147654321;
     }
 }
 
 int main(int argc, char** argv) {
     if (argc != 2) {
-        printf("usage: ./reduce_v0 [N]\n");
+        printf("usage: ./reduce_v1 [N]\n");
         exit(0);
     }
 
@@ -39,7 +65,7 @@ int main(int argc, char** argv) {
     size_t bytes = N * sizeof(float);
 
     float* h_A = (float*)malloc(bytes);
-    for (size_t i = 0; i < N; i++) h_A[i] = 1.0f; // Each element is 1.0
+    init_matrix(h_A, 1, N);
 
     float *d_A, *B;
     CHECK_CUDA(cudaMalloc(&d_A, bytes));
@@ -60,7 +86,7 @@ int main(int argc, char** argv) {
         CHECK_CUDA(cudaMemset(B, 0, sizeof(float)));
         dim3 block_size(BLOCK_SIZE);
         dim3 grid_size(CEIL(N, BLOCK_SIZE));
-        reduce_v0<<<grid_size, block_size>>>(d_A, B, N);
+        reduce_v1<<<grid_size, block_size>>>(d_A, B, N);
     }
     CHECK_CUDA(cudaEventRecord(stop));
     CHECK_CUDA(cudaEventSynchronize(stop));

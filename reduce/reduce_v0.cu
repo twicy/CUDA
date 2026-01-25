@@ -15,17 +15,16 @@
 
 #define CEIL(a, b) (((a) + (b) - 1) / (b))
 
-__global__ void reduce_v0(float* A, float* B, size_t size) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    float val = 0.0f;
-    if (idx < size) {
-        val = A[idx];
+__global__ void reduce_v0(float* A, float* sum, int N) {
+    int a_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (a_idx < N) {
+        atomicAdd(sum, A[a_idx]);
     }
-    
-    // Using atomicAdd for simplicity in this example
-    // Note: A real optimized kernel would use shared memory/warp shuffles first
-    if (val != 0.0f) {
-        atomicAdd(B, val);
+}
+
+static void init_matrix(float *arr, int rows, int cols) {
+    for (size_t i = 0; i < (size_t)rows * (size_t)cols; i++){
+        arr[i] = rand() / (float)1147654321;
     }
 }
 
@@ -39,7 +38,7 @@ int main(int argc, char** argv) {
     size_t bytes = N * sizeof(float);
 
     float* h_A = (float*)malloc(bytes);
-    for (size_t i = 0; i < N; i++) h_A[i] = 1.0f; // Each element is 1.0
+    init_matrix(h_A, 1, N);
 
     float *d_A, *B;
     CHECK_CUDA(cudaMalloc(&d_A, bytes));
