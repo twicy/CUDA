@@ -1,4 +1,5 @@
 all:
+#-arch=sm_89 for NVIDIA L4
 	nvcc sgemm_v0.cu -g -lcublas -o sgemm_v0
 	nvcc sgemm_v1.cu -g -lcublas -o sgemm_v1
 	nvcc sgemm_v2.cu -g -lcublas -o sgemm_v2

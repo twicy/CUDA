@@ -22,11 +22,13 @@ __global__ void sgemm_v0(float * __restrict__ A,
     int a_row = blockIdx.y * blockDim.y + threadIdx.y;
     int b_col = blockIdx.x * blockDim.x + threadIdx.x;
 
-    float sum = 0.0f;
-    for (int k = 0; k < K; k++) {
-        sum += A[OFFSET(a_row, k, M, K)] * B[OFFSET(k, b_col, K, N)];
+    if (a_row < M && b_col < N) {
+        float sum = 0.0f;
+        for (int k = 0; k < K; k++) {
+            sum += A[OFFSET(a_row, k, M, K)] * B[OFFSET(k, b_col, K, N)];
+        }
+        C[OFFSET(a_row, b_col, M, N)] = sum;
     }
-    C[OFFSET(a_row, b_col, M, N)] = sum;
 }
 
 static void init_matrix(float *arr, int rows, int cols) {
