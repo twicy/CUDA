@@ -67,18 +67,22 @@ __global__ void sgemm_v5_nonvec(float * __restrict__ A,
     };
 
     auto load_ar = [&] (int k, int stage) {
+        #pragma unroll
         for (int i = 0; i < TM; i++) {
             Ar[i] = AsT[stage][k][i + thread_row];
         }
     };
     auto load_br = [&] (int k, int stage) {
+        #pragma unroll
         for (int i = 0; i < TN; i++) {
             Br[i] = Bs[stage][k][i + thread_col];
         }
     };
 
     auto mma = [&] () {
+        #pragma unroll
         for (int m = 0; m < TM; m++) {
+            #pragma unroll
             for (int n = 0; n < TN; n++) {
                 acc[m][n] += Ar[m] * Br[n];
             }
@@ -86,9 +90,11 @@ __global__ void sgemm_v5_nonvec(float * __restrict__ A,
     };
 
     auto store_c = [&]() {
+        #pragma unroll
         for (int m = 0; m < TM; m++) {
             int c_row = block_row + thread_row + m;
             if (c_row >= M) break;
+            #pragma unroll
             for (int n = 0; n < TN; n++) {
                 int c_col = block_col + thread_col + n;
                 if (c_col >= N) break;
@@ -107,6 +113,7 @@ __global__ void sgemm_v5_nonvec(float * __restrict__ A,
         load_ast(ph, other_stage);
         load_bs(ph, other_stage);
 
+        #pragma unroll
         for (int k = 0; k < BK; k++) {
             load_ar(k, curr_stage);
             load_br(k, curr_stage);
@@ -117,6 +124,7 @@ __global__ void sgemm_v5_nonvec(float * __restrict__ A,
         other_stage = 1 - curr_stage;
     }
 
+    #pragma unroll
     for (int k = 0; k < BK; k++) {
         load_ar(k, curr_stage);
         load_br(k, curr_stage);
@@ -187,17 +195,20 @@ __global__ void sgemm_v5_vec(float * __restrict__ A,
     };
 
     auto load_ar = [&] (int k, int stage) {
+        #pragma unroll
         for (int i = 0; i < TM; i += 4) {
             FLOAT4(Ar[i]) = FLOAT4(AsT[stage][k][i + thread_row]);
         }
     };
     auto load_br = [&] (int k, int stage) {
+        #pragma unroll
         for (int i = 0; i < TN; i += 4) {
             FLOAT4(Br[i]) = FLOAT4(Bs[stage][k][i + thread_col]);
         }
     };
 
     auto mma = [&] () {
+        #pragma unroll
         for (int m = 0; m < TM; m++) {
             for (int n = 0; n < TN; n++) {
                 acc[m][n] += Ar[m] * Br[n];
@@ -206,9 +217,11 @@ __global__ void sgemm_v5_vec(float * __restrict__ A,
     };
 
     auto store_c = [&]() {
+        #pragma unroll
         for (int m = 0; m < TM; m++) {
             int c_row = block_row + thread_row + m;
             if (c_row >= M) break;
+            #pragma unroll
             for (int n = 0; n < TN; n++) {
                 int c_col = block_col + thread_col + n;
                 if (c_col >= N) break;
@@ -227,6 +240,7 @@ __global__ void sgemm_v5_vec(float * __restrict__ A,
         load_ast(ph, other_stage);
         load_bs(ph, other_stage);
 
+        #pragma unroll
         for (int k = 0; k < BK; k++) {
             load_ar(k, curr_stage);
             load_br(k, curr_stage);
@@ -237,6 +251,7 @@ __global__ void sgemm_v5_vec(float * __restrict__ A,
         other_stage = 1 - curr_stage;
     }
 
+    #pragma unroll
     for (int k = 0; k < BK; k++) {
         load_ar(k, curr_stage);
         load_br(k, curr_stage);

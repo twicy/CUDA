@@ -24,6 +24,7 @@ __global__ void sgemm_v0(float * __restrict__ A,
 
     if (a_row < M && b_col < N) {
         float sum = 0.0f;
+        #pragma unroll
         for (int k = 0; k < K; k++) {
             sum += A[OFFSET(a_row, k, M, K)] * B[OFFSET(k, b_col, K, N)];
         }

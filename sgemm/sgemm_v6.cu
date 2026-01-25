@@ -90,7 +90,9 @@ __global__ void sgemm_v6_nonvec(float * __restrict__ A,
     };
 
     auto mma = [&] () {
+        #pragma unroll
         for (int m = 0; m < TM; m++) {
+            #pragma unroll
             for (int n = 0; n < TN; n++) {
                 acc[m][n] += Ar[m] * Br[n];
             }
@@ -129,6 +131,7 @@ __global__ void sgemm_v6_nonvec(float * __restrict__ A,
         load_ast(ph, other_stage);
         load_bs(ph, other_stage);
 
+        #pragma unroll
         for (int k = 0; k < BK; k++) {
             load_ar(k, curr_stage);
             load_br(k, curr_stage);
@@ -139,6 +142,7 @@ __global__ void sgemm_v6_nonvec(float * __restrict__ A,
         other_stage = 1 - curr_stage;
     }
 
+    #pragma unroll
     for (int k = 0; k < BK; k++) {
         load_ar(k, curr_stage);
         load_br(k, curr_stage);
@@ -232,7 +236,9 @@ __global__ void sgemm_v6_vec(float * __restrict__ A,
     };
 
     auto mma = [&] () {
+        #pragma unroll
         for (int m = 0; m < TM; m++) {
+            #pragma unroll
             for (int n = 0; n < TN; n++) {
                 acc[m][n] += Ar[m] * Br[n];
             }
@@ -271,6 +277,7 @@ __global__ void sgemm_v6_vec(float * __restrict__ A,
         load_ast(ph, other_stage);
         load_bs(ph, other_stage);
 
+        #pragma unroll
         for (int k = 0; k < BK; k++) {
             load_ar(k, curr_stage);
             load_br(k, curr_stage);
@@ -281,6 +288,7 @@ __global__ void sgemm_v6_vec(float * __restrict__ A,
         other_stage = 1 - curr_stage;
     }
 
+    #pragma unroll
     for (int k = 0; k < BK; k++) {
         load_ar(k, curr_stage);
         load_br(k, curr_stage);

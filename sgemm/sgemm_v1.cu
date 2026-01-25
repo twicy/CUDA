@@ -61,6 +61,7 @@ __global__ void sgemm_v1(float * __restrict__ A,
         load_as(ph);
         load_bs(ph);
         __syncthreads();
+        #pragma unroll
         for (int k = 0; k < TILE_SIZE; k++) {
             sum += As[thread_row][k] * Bs[k][thread_col];
         }

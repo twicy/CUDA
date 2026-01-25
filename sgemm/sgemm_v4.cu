@@ -67,18 +67,22 @@ __global__ void sgemm_v4_nonvec(float * __restrict__ A,
     };
 
     auto load_ar = [&] (int k) {
+        #pragma unroll
         for (int i = 0; i < TM; i++) {
             Ar[i] = AsT[k][i + thread_row];
         }
     };
     auto load_br = [&] (int k) {
+        #pragma unroll
         for (int i = 0; i < TN; i++) {
             Br[i] = Bs[k][i + thread_col];
         }
     };
 
     auto mma = [&] () {
+        #pragma unroll
         for (int m = 0; m < TM; m++) {
+            #pragma unroll
             for (int n = 0; n < TN; n++) {
                 acc[m][n] += Ar[m] * Br[n];
             }
@@ -86,9 +90,11 @@ __global__ void sgemm_v4_nonvec(float * __restrict__ A,
     };
 
     auto store_c = [&]() {
+        #pragma unroll
         for (int m = 0; m < TM; m++) {
             int c_row = block_row + thread_row + m;
             if (c_row >= M) break;
+            #pragma unroll
             for (int n = 0; n < TN; n++) {
                 int c_col = block_col + thread_col + n;
                 if (c_col >= N) break;
@@ -101,6 +107,7 @@ __global__ void sgemm_v4_nonvec(float * __restrict__ A,
         load_ast(ph);
         load_bs(ph);
         __syncthreads();
+        #pragma unroll
         for (int k = 0; k < BK; k++) {
             load_ar(k);
             load_br(k);
