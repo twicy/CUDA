@@ -7,5 +7,8 @@ all:
 	nvcc sgemm_v4.cu -g -lcublas -o sgemm_v4
 	nvcc sgemm_v5.cu -g -lcublas -o sgemm_v5
 	nvcc sgemm_v6.cu -g -lcublas -o sgemm_v6
+	nvcc sgemm_128x128x8_v0.cu -g -lcublas -o sgemm_128x128x8_v0
+	nvcc sgemm_128x128x8_v1.cu -g -lcublas -o sgemm_128x128x8_v1
 clean:
 	rm -rf *.o sgemm_v0 sgemm_v1 sgemm_v2 sgemm_v3 sgemm_v4 sgemm_v5 sgemm_v6
+	rm -rf *.o sgemm_128x128x8_v0 sgemm_128x128x8_v1
