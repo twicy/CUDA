@@ -11,256 +11,131 @@
 	} \
 } while(0)
 #define CEIL(a, b)	(((a) + (b) - 1) / (b))
-#define OFFSET(r,c,nrows,ncols) ((r)*(ncols)+(c))
+#define OFFSET(r,c,ncols) ((r)*(ncols)+(c))
 #define FLOAT4(pointer) (reinterpret_cast<float4 *>(&(pointer))[0])
 
-template <const int BM, const int BN, const int BK,
-            const int TM, const int TN>
-__global__ void sgemm_v5_nonvec(float * __restrict__ A,
-                        float * __restrict__ B,
-                        float * __restrict__ C,
-                        const int M,
-                        const int K,
-                        const int N) {
-    __shared__ float AsT[2][BK][BM];
-    __shared__ float Bs[2][BK][BN];
+__global__ __launch_bounds__(256, 2)
+void sgemm_v5(
+    const float* __restrict__ A,
+    const float* __restrict__ B,
+    float* __restrict__ C,
+    int M, int K, int N)
+{
+    __shared__ __align__(16) float AsT[8][132];
+    __shared__ __align__(16) float Bs[8][128];
 
-    float Ar[TM] = {0.0f};
-    float Br[TN] = {0.0f};
-    float acc[TM][TN] = {{0.0f}};
+    __align__(16) float A_frag[8];
+    __align__(16) float B_frag[8];
+    __align__(16) float acc[8][8] = {0.0f};
 
-    int block_row = blockIdx.y * BM;
-    int block_col = blockIdx.x * BN;
-    int thread_row = threadIdx.y * TM;
-    int thread_col = threadIdx.x * TN;
-    int nthreads = blockDim.x * blockDim.y;
-    int tid = threadIdx.y * blockDim.x + threadIdx.x;
+    const int warpId = threadIdx.x / 32;
+    const int laneId = threadIdx.x % 32;
+    const int block_row = 128 * blockIdx.y;
+    const int block_col = 128 * blockIdx.x;
+    /* Loading global memory to reg */
+    float4 A_ldg_reg;
+    float4 B_ldg_reg;
+    const int A_thread_row = (threadIdx.x / 8) * 4;
+    const int A_thread_col = threadIdx.x % 8;
+    const int A_row = block_row + A_thread_row;
+    /* First element to be loaded */
+    const int B_thread_row = threadIdx.x / 32;
+    const int B_thread_col = threadIdx.x % 32;
+    const int B_col = block_col + B_thread_col;
+    /* Computational */
+    const int warp_row = (warpId / 2) * 4 * 8;
+    const int warp_col = (warpId % 2) * 4 * 16;
+    const int frag_row = (laneId / 16) * 2  + (laneId % 2);
+    const int frag_col = (laneId / 2) % 8;
+    const int A_frag_row = warp_row + frag_row * 4;
+    const int B_frag_col = warp_col + frag_col * 4;
 
-    auto load_ast = [&](int ph, int stage) {
-        int nelements = BM * BK;
-        for (int i = tid; i < nelements; i += nthreads) {
-            int shmem_row = i / BK;
-            int shmem_col = i % BK;
-            int a_row = block_row + shmem_row;
-            int a_col = ph * BK + shmem_col;
-            if (a_row < M && a_col < K) {
-                AsT[stage][shmem_col][shmem_row] = A[OFFSET(a_row, a_col, M, K)];
-            } else {
-                AsT[stage][shmem_col][shmem_row] = 0.0f;
-            }
-        }
+    auto ld_g2r_a = [&] (int ph) {
+        int col = ph * 8 + A_thread_col;
+        A_ldg_reg.x = (A_row < M && col < K) ? A[OFFSET(A_row, col, K)] : 0.0f;
+        A_ldg_reg.y = (A_row + 1 < M && col < K) ? A[OFFSET(A_row + 1, col, K)] : 0.0f;
+        A_ldg_reg.z = (A_row + 2 < M && col < K) ? A[OFFSET(A_row + 2, col, K)] : 0.0f;
+        A_ldg_reg.w = (A_row + 3 < M && col < K) ? A[OFFSET(A_row + 3, col, K)] : 0.0f;
     };
 
-    auto load_bs = [&](int ph, int stage) {
-        int nelements = BK * BN;
-        for (int i = tid; i < nelements; i += nthreads) {
-            int shmem_row = i / BN;
-            int shmem_col = i % BN;
-            int b_row = ph * BK + shmem_row;
-            int b_col = block_col + shmem_col;
-            if (b_row < K && b_col < N) {
-                Bs[stage][shmem_row][shmem_col] = B[OFFSET(b_row, b_col, K, N)];
-            } else {
-                Bs[stage][shmem_row][shmem_col] = 0.0f;
-            }
-        }
+    auto ld_g2r_b = [&] (int ph) {
+        int row = ph * 8 + B_thread_row;
+        B_ldg_reg.x = (row < K && B_col < N) ? B[OFFSET(row, B_col, N)] : 0.0f;
+        B_ldg_reg.y = (row < K && B_col + 32 < N) ? B[OFFSET(row, B_col + 32, N)] : 0.0f;
+        B_ldg_reg.z = (row < K && B_col + 64 < N) ? B[OFFSET(row, B_col + 64, N)] : 0.0f;
+        B_ldg_reg.w = (row < K && B_col + 96 < N) ? B[OFFSET(row, B_col + 96, N)] : 0.0f;
     };
 
-    auto load_ar = [&] (int k, int stage) {
-        #pragma unroll
-        for (int i = 0; i < TM; i++) {
-            Ar[i] = AsT[stage][k][i + thread_row];
-        }
-    };
-    auto load_br = [&] (int k, int stage) {
-        #pragma unroll
-        for (int i = 0; i < TN; i++) {
-            Br[i] = Bs[stage][k][i + thread_col];
-        }
+    auto st_r2s_a = [&] () {
+        FLOAT4(AsT[A_thread_col][A_thread_row]) = A_ldg_reg;
     };
 
-    auto mma = [&] () {
-        #pragma unroll
-        for (int m = 0; m < TM; m++) {
-            #pragma unroll
-            for (int n = 0; n < TN; n++) {
-                acc[m][n] += Ar[m] * Br[n];
-            }
-        }
-    };
-
-    auto store_c = [&]() {
-        #pragma unroll
-        for (int m = 0; m < TM; m++) {
-            int c_row = block_row + thread_row + m;
-            if (c_row >= M) break;
-            #pragma unroll
-            for (int n = 0; n < TN; n++) {
-                int c_col = block_col + thread_col + n;
-                if (c_col >= N) break;
-                C[OFFSET(c_row, c_col, M, N)] = acc[m][n];
-            }
-        }
-    };
-
-    int ph = 0;
-    int curr_stage = 0, other_stage = 1;
-    load_ast(ph, curr_stage);
-    load_bs(ph, curr_stage);
-    __syncthreads();
-
-    for (ph = 1; ph < CEIL(K, BK); ph++) {
-        load_ast(ph, other_stage);
-        load_bs(ph, other_stage);
-
-        #pragma unroll
-        for (int k = 0; k < BK; k++) {
-            load_ar(k, curr_stage);
-            load_br(k, curr_stage);
-            mma();
-        }
-        __syncthreads();
-        curr_stage = other_stage;
-        other_stage = 1 - curr_stage;
-    }
-
-    #pragma unroll
-    for (int k = 0; k < BK; k++) {
-        load_ar(k, curr_stage);
-        load_br(k, curr_stage);
-        mma();
-    }
-
-    __syncthreads();
-    store_c();
-}
-
-template <const int BM, const int BN, const int BK,
-            const int TM, const int TN>
-__global__ void sgemm_v5_vec(float * __restrict__ A,
-                        float * __restrict__ B,
-                        float * __restrict__ C,
-                        const int M,
-                        const int K,
-                        const int N) {
-    __shared__ float AsT[2][BK][BM];
-    __shared__ float Bs[2][BK][BN];
-
-    float Ar[TM] = {0.0f};
-    float Br[TN] = {0.0f};
-    float acc[TM][TN] = {{0.0f}};
-
-    int block_row = blockIdx.y * BM;
-    int block_col = blockIdx.x * BN;
-    int thread_row = threadIdx.y * TM;
-    int thread_col = threadIdx.x * TN;
-    int nthreads = blockDim.x * blockDim.y;
-    int tid = threadIdx.y * blockDim.x + threadIdx.x;
-
-    auto load_ast = [&](int ph, int stage) {
-        int nelements = BM * BK;
-        for (int i = 4 * tid; i < nelements; i += 4 * nthreads) {
-            int shmem_row = i / BK;
-            int shmem_col = i % BK;
-            int a_row = block_row + shmem_row;
-            int a_col = ph * BK + shmem_col;
-            if (a_row < M && a_col < K) {
-                float4 a4 = FLOAT4(A[OFFSET(a_row, a_col, M, K)]);
-                AsT[stage][shmem_col][shmem_row] = a4.x;
-                AsT[stage][shmem_col + 1][shmem_row] = a4.y;
-                AsT[stage][shmem_col + 2][shmem_row] = a4.z;
-                AsT[stage][shmem_col + 3][shmem_row] = a4.w;
-            } else {
-                AsT[stage][shmem_col][shmem_row] = 0.0f;
-                AsT[stage][shmem_col + 1][shmem_row] = 0.0f;
-                AsT[stage][shmem_col + 2][shmem_row] = 0.0f;
-                AsT[stage][shmem_col + 3][shmem_row] = 0.0f;
-            }
-        }
-    };
-
-    auto load_bs = [&](int ph, int stage) {
-        int nelements = BK * BN;
-        for (int i = 4 * tid; i < nelements; i += 4 * nthreads) {
-            int shmem_row = i / BN;
-            int shmem_col = i % BN;
-            int b_row = ph * BK + shmem_row;
-            int b_col = block_col + shmem_col;
-            if (b_row < K && b_col < N) {
-                FLOAT4(Bs[stage][shmem_row][shmem_col]) = FLOAT4(B[OFFSET(b_row, b_col, K, N)]);
-            } else {
-                FLOAT4(Bs[stage][shmem_row][shmem_col]) = {0.0f, 0.0f, 0.0f, 0.0f};
-            }
-        }
-    };
-
-    auto load_ar = [&] (int k, int stage) {
-        #pragma unroll
-        for (int i = 0; i < TM; i += 4) {
-            FLOAT4(Ar[i]) = FLOAT4(AsT[stage][k][i + thread_row]);
-        }
-    };
-    auto load_br = [&] (int k, int stage) {
-        #pragma unroll
-        for (int i = 0; i < TN; i += 4) {
-            FLOAT4(Br[i]) = FLOAT4(Bs[stage][k][i + thread_col]);
-        }
+    auto st_r2s_b = [&] () {
+        Bs[B_thread_row][B_thread_col] = B_ldg_reg.x;
+        Bs[B_thread_row][B_thread_col + 32] = B_ldg_reg.y;
+        Bs[B_thread_row][B_thread_col + 64] = B_ldg_reg.z;
+        Bs[B_thread_row][B_thread_col + 96] = B_ldg_reg.w;
     };
 
     auto mma = [&] () {
         #pragma unroll
-        for (int m = 0; m < TM; m++) {
-            for (int n = 0; n < TN; n++) {
-                acc[m][n] += Ar[m] * Br[n];
-            }
-        }
-    };
-
-    auto store_c = [&]() {
-        #pragma unroll
-        for (int m = 0; m < TM; m++) {
-            int c_row = block_row + thread_row + m;
-            if (c_row >= M) break;
+        for (int i = 0; i < 8; i++) {
             #pragma unroll
-            for (int n = 0; n < TN; n++) {
-                int c_col = block_col + thread_col + n;
-                if (c_col >= N) break;
-                C[OFFSET(c_row, c_col, M, N)] = acc[m][n];
+            for (int j = 0; j < 8; j++) {
+                acc[i][j] += A_frag[i] * B_frag[j];
             }
         }
     };
 
-    int ph = 0;
-    int curr_stage = 0, other_stage = 1;
-    load_ast(ph, curr_stage);
-    load_bs(ph, curr_stage);
-    __syncthreads();
+    auto ld_frag_a = [&] (int k) {
+        FLOAT4(A_frag[0]) = FLOAT4(AsT[k][A_frag_row]);
+        FLOAT4(A_frag[4]) = FLOAT4(AsT[k][A_frag_row + 16]);
+    };
 
-    for (ph = 1; ph < CEIL(K, BK); ph++) {
-        load_ast(ph, other_stage);
-        load_bs(ph, other_stage);
+    auto ld_frag_b = [&] (int k) {
+        FLOAT4(B_frag[0]) = FLOAT4(Bs[k][B_frag_col]);
+        FLOAT4(B_frag[4]) = FLOAT4(Bs[k][B_frag_col + 32]);
+    };
 
+    auto st_r2g_c = [&] () {
         #pragma unroll
-        for (int k = 0; k < BK; k++) {
-            load_ar(k, curr_stage);
-            load_br(k, curr_stage);
-            mma();
+        for (int i = 0; i < 2; i++) {
+            #pragma unroll
+            for (int j = 0; j < 2; j++) {
+                #pragma unroll
+                for (int row = 0; row < 4; row++) {
+                    int c_row = block_row + warp_row + i * 16 + frag_row * 4 + row;
+                    int c_col = block_col + warp_col + j * 32 + frag_col * 4;
+                    if (c_row < M && c_col < N) {
+                        FLOAT4(C[OFFSET(c_row, c_col, N)]) = FLOAT4(acc[4 * i + row][4 * j]);
+                    }
+                }
+            }
         }
-        __syncthreads();
-        curr_stage = other_stage;
-        other_stage = 1 - curr_stage;
-    }
+    };
 
     #pragma unroll
-    for (int k = 0; k < BK; k++) {
-        load_ar(k, curr_stage);
-        load_br(k, curr_stage);
-        mma();
+    for (int ph = 0; ph < CEIL(K, 8); ph++) {
+        ld_g2r_a(ph);
+        ld_g2r_b(ph);
+        st_r2s_a();
+        st_r2s_b();
+
+        __syncthreads();
+
+        #pragma unroll
+        for (int k = 0; k < 8; k++) {
+            ld_frag_a(k);
+            ld_frag_b(k);
+            mma();
+        }
+
+        __syncthreads();
     }
 
-    __syncthreads();
-    store_c();
+    st_r2g_c();
 }
+
 
 static void init_matrix(float *arr, int rows, int cols) {
     for (size_t i = 0; i < (size_t)rows * (size_t)cols; i++){
@@ -310,16 +185,23 @@ int main(int argc, char** argv) {
     CHECK_CUDA(cudaEventCreate(&start));
     CHECK_CUDA(cudaEventCreate(&stop));
 
-	const int BM = 128, BN = 128, BK = 8;
-    const int TM = 8, TN = 8;
     CHECK_CUDA(cudaEventRecord(start));
     for (int run = 0 ; run < nIter; run ++ ) {
-        dim3 block_size(BN / TN, BM / TM);
-        dim3 grid_size(CEIL(N, BN), CEIL(M, BM));
+        dim3 block_size(256);
+        dim3 grid_size(CEIL(N, 128), CEIL(M, 128));
         if (M % 4 == 0 && N % 4 == 0 && K % 4 == 0) {
-            sgemm_v5_vec<BM, BN, BK, TM, TN><<<grid_size, block_size>>>(d_A, d_B, d_C, M, K, N);
+            sgemm_v5<<<grid_size, block_size>>>(d_A, d_B, d_C, M, K, N);
         } else {
-            sgemm_v5_nonvec<BM, BN, BK, TM, TN><<<grid_size, block_size>>>(d_A, d_B, d_C, M, K, N);
+            printf("M, N, K needs to be multiple of 4\n");
+            cudaFree(d_A);
+            cudaFree(d_B);
+            cudaFree(d_C);
+            
+            free(h_A);
+            free(h_B);
+            free(h_C);
+            free(h_C1);
+            return -1;
         }
     }
     CHECK_CUDA(cudaEventRecord(stop));
@@ -405,4 +287,5 @@ int main(int argc, char** argv) {
     free(h_B);
     free(h_C);
     free(h_C1);
+    return 0;
 }
