@@ -15,7 +15,7 @@
 #define FLOAT4(pointer) (reinterpret_cast<float4 *>(&(pointer))[0])
 
 __global__ __launch_bounds__(256, 2)
-void sgemm_128x128x8_kernel_v1(
+void sgemm_v6(
     const float* __restrict__ A,
     const float* __restrict__ B,
     float* __restrict__ C,
@@ -23,7 +23,7 @@ void sgemm_128x128x8_kernel_v1(
 {
     __shared__ __align__(16) float AsT[8][132];
     __shared__ __align__(16) float Bs[8][128];
-    __shared__ __align__(16) float Cs[16][64];
+    __shared__ __align__(16) float Cs[8][16][36];
 
     __align__(16) float A_frag[8];
     __align__(16) float B_frag[8];
@@ -98,24 +98,29 @@ void sgemm_128x128x8_kernel_v1(
         FLOAT4(B_frag[4]) = FLOAT4(Bs[k][B_frag_col + 32]);
     };
 
-    int cs_warp_row = (warpId / 2) * 4;
-    int cs_warp_col = (warpId % 2) * 32;
-    /* Each thread takes care of 4 thread blocks */
-    auto st_r2s_c = [&] (int i, int j, int row) {
-        FLOAT4(Cs[cs_warp_row + frag_row][cs_warp_col + frag_col * 4]) = FLOAT4(acc[4 * i + row][4 * j]);
-    };
+    auto st_r2g_c = [&] () {
+        #pragma unroll
+        for (int i = 0; i < 2; i++) {
+            #pragma unroll
+            for (int j = 0; j < 2; j++) {
+                #pragma unroll
+                for (int row = 0; row < 4; row++) {
+                    FLOAT4(Cs[warpId][frag_row * 4 + row][frag_col * 4]) = FLOAT4(acc[4 * i + row][4 * j]);
+                }
+                __syncwarp();
 
-    int reorg_cs_warp_row = (warpId / 2) * 4;
-    int reorg_cs_warp_col = (warpId % 2) * 32;
-    int reorg_frag_row = laneId / 8;
-    int reorg_frag_col = laneId % 8;
-    int cs_row = reorg_cs_warp_row + reorg_frag_row;
-    int cs_col = reorg_cs_warp_col + reorg_frag_col * 4;
-    auto st_s2g_c = [&] (int i, int j, int row) {
-        int c_row = block_row + warp_row + i * 16 + reorg_frag_row * 4 + row;
-        int c_col = block_col + warp_col + j * 32 + reorg_frag_col * 4;
-        if (c_row < M && c_col < N) {
-            FLOAT4(C[OFFSET(c_row, c_col, N)]) = FLOAT4(Cs[cs_row][cs_col]);
+                const int c_col = block_col + warp_col + j * 32 + laneId;
+               
+                #pragma unroll
+                for (int p = 0; p < 16; p++) {
+                    const int c_row = block_row + warp_row + i * 16 + p;
+                    if (c_row < M && c_col < N) {
+                        C[OFFSET(c_row, c_col, N)] = Cs[warpId][p][laneId];
+                    }
+                }
+                
+                __syncwarp();
+            }
         }
     };
 
@@ -138,19 +143,7 @@ void sgemm_128x128x8_kernel_v1(
         __syncthreads();
     }
 
-    #pragma unroll
-    for (int i = 0; i < 2; i++) {
-        #pragma unroll
-        for (int j = 0; j < 2; j++) {
-            #pragma unroll
-            for (int row = 0; row < 4; row++) {
-                st_r2s_c(i, j, row);
-                __syncwarp();
-                st_s2g_c(i, j, row);
-                __syncwarp();
-            }
-        }
-    }
+    st_r2g_c();
 }
 
 
@@ -207,9 +200,18 @@ int main(int argc, char** argv) {
         dim3 block_size(256);
         dim3 grid_size(CEIL(N, 128), CEIL(M, 128));
         if (M % 4 == 0 && N % 4 == 0 && K % 4 == 0) {
-            sgemm_128x128x8_kernel_v1<<<grid_size, block_size>>>(d_A, d_B, d_C, M, K, N);
+            sgemm_v6<<<grid_size, block_size>>>(d_A, d_B, d_C, M, K, N);
         } else {
-            sgemm_128x128x8_kernel_v1<<<grid_size, block_size>>>(d_A, d_B, d_C, M, K, N);
+            printf("M, N, K needs to be multiple of 4\n");
+            cudaFree(d_A);
+            cudaFree(d_B);
+            cudaFree(d_C);
+            
+            free(h_A);
+            free(h_B);
+            free(h_C);
+            free(h_C1);
+            return -1;
         }
     }
     CHECK_CUDA(cudaEventRecord(stop));
@@ -295,4 +297,5 @@ int main(int argc, char** argv) {
     free(h_B);
     free(h_C);
     free(h_C1);
+    return 0;
 }
