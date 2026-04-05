@@ -14,6 +14,23 @@
 #define OFFSET(r,c,ncols) ((r)*(ncols)+(c))
 #define FLOAT4(pointer) (reinterpret_cast<float4 *>(&(pointer))[0])
 
+__device__ __forceinline__
+void ldg32_nc_0(float &reg, const void *ptr, bool guard) {
+    asm volatile (
+        "{.reg .pred p;\n"
+        " setp.ne.b32 p, %2, 0;\n"
+        " @!p mov.b32 %0, 0;\n"
+#if __CUDACC_VER_MAJOR__ >= 11 && __CUDACC_VER_MINOR__ >= 4 && \
+    __CUDA_ARCH__ >= 750
+        " @p ld.global.nc.L2::128B.f32 %0, [%1];}\n"
+#else
+        " @p ld.global.nc.f32 %0, [%1];}\n"
+#endif
+        : "=f"(reg)
+        : "l"(ptr), "r"((int)guard)
+    );
+}
+
 __global__ __launch_bounds__(256, 2)
 void sgemm_v7(
     const float* __restrict__ A,
@@ -57,18 +74,18 @@ void sgemm_v7(
 
     auto ld_g2r_a = [&] (int ph) {
         int col = ph * 8 + A_thread_col;
-        A_ldg_reg.x = (A_row < M && col < K) ? A[OFFSET(A_row, col, K)] : 0.0f;
-        A_ldg_reg.y = (A_row + 1 < M && col < K) ? A[OFFSET(A_row + 1, col, K)] : 0.0f;
-        A_ldg_reg.z = (A_row + 2 < M && col < K) ? A[OFFSET(A_row + 2, col, K)] : 0.0f;
-        A_ldg_reg.w = (A_row + 3 < M && col < K) ? A[OFFSET(A_row + 3, col, K)] : 0.0f;
+        ldg32_nc_0(A_ldg_reg.x, &A[OFFSET(A_row, col, K)], A_row < M && col < K);
+        ldg32_nc_0(A_ldg_reg.y, &A[OFFSET(A_row + 1, col, K)], A_row + 1 < M && col < K);
+        ldg32_nc_0(A_ldg_reg.z, &A[OFFSET(A_row + 2, col, K)], A_row + 2 < M && col < K);
+        ldg32_nc_0(A_ldg_reg.w, &A[OFFSET(A_row + 3, col, K)], A_row + 3 < M && col < K);
     };
 
     auto ld_g2r_b = [&] (int ph) {
         int row = ph * 8 + B_thread_row;
-        B_ldg_reg.x = (row < K && B_col < N) ? B[OFFSET(row, B_col, N)] : 0.0f;
-        B_ldg_reg.y = (row < K && B_col + 32 < N) ? B[OFFSET(row, B_col + 32, N)] : 0.0f;
-        B_ldg_reg.z = (row < K && B_col + 64 < N) ? B[OFFSET(row, B_col + 64, N)] : 0.0f;
-        B_ldg_reg.w = (row < K && B_col + 96 < N) ? B[OFFSET(row, B_col + 96, N)] : 0.0f;
+        ldg32_nc_0(B_ldg_reg.x, &B[OFFSET(row, B_col, N)], row < K && B_col < N);
+        ldg32_nc_0(B_ldg_reg.y, &B[OFFSET(row, B_col + 32, N)], row < K && B_col + 32 < N);
+        ldg32_nc_0(B_ldg_reg.z, &B[OFFSET(row, B_col + 64, N)], row < K && B_col + 64 < N);
+        ldg32_nc_0(B_ldg_reg.w, &B[OFFSET(row, B_col + 96, N)], row < K && B_col + 96 < N);
     };
 
     auto st_r2s_a = [&] () {
